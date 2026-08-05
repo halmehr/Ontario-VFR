@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="en-CA">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Airspace Fetcher — openAIP → airspace-on.json</title>
+<style>
+  :root{--panel:#0b0e13;--panel2:#131926;--line:#232c3f;--data:#3fd2f2;--amber:#ffb000;
+    --grn:#37d67a;--txt:#dbe4f0;--dim:#7c8aa3;--mono:"Roboto Mono",ui-monospace,Menlo,monospace}
+  body{margin:0;background:var(--panel);color:var(--txt);font-family:"Segoe UI",Roboto,system-ui,sans-serif;
+    padding:18px;max-width:560px;margin:0 auto}
+  h1{font-size:15px;letter-spacing:.14em;color:var(--dim);font-family:var(--mono)}
+  .card{background:var(--panel2);border:1px solid var(--line);border-radius:16px;padding:16px;margin-bottom:14px}
+  label{font-size:13px;color:var(--dim);display:block;margin-bottom:6px}
+  input{width:100%;padding:12px;border-radius:10px;border:1px solid var(--line);background:#0b0e13;
+    color:var(--txt);font-size:15px;font-family:var(--mono);box-sizing:border-box}
+  .btn{display:block;width:100%;padding:14px;border-radius:12px;border:1px solid var(--data);background:none;
+    color:var(--data);font-size:16px;margin-top:12px;cursor:pointer}
+  .btn:disabled{border-color:var(--line);color:var(--dim)}
+  .btn.dl{border-color:var(--grn);color:var(--grn);text-align:center;text-decoration:none;box-sizing:border-box;display:none}
+  #log{font-family:var(--mono);font-size:12px;line-height:1.7;color:var(--dim);white-space:pre-wrap;margin-top:10px}
+  #log .ok{color:var(--grn)} #log .err{color:var(--amber)}
+  p.note{font-size:12px;color:var(--dim);line-height:1.5}
+</style>
+</head>
+<body>
+<h1>OPENAIP → AIRSPACE-ON.JSON</h1>
+
+<div class="card">
+  <label>Your openAIP API key (stays on this phone — never uploaded anywhere except to openAIP itself)</label>
+  <input type="password" id="key" autocomplete="off" placeholder="paste key">
+  <label style="margin-top:12px">Bounding box (lon/lat — preset covers southern Ontario + border areas)</label>
+  <input type="text" id="bbox" value="-84.5,41.5,-74.0,46.5">
+  <button class="btn" id="go">Fetch airspace</button>
+  <a class="btn dl" id="dl" download="airspace-on.json">Download airspace-on.json</a>
+  <div id="log"></div>
+</div>
+
+<p class="note">This page calls the openAIP API directly from your browser, converts the result to a compact
+GeoJSON file, and gives you a download. Upload that file to the GitHub repo beside index.html
+(keep the exact name <b>airspace-on.json</b> — beware the “-1” rename if an old copy sits in Downloads).
+Re-run every few months to refresh. Community-maintained data — verify against current VNC/VTA/CFS.</p>
+
+<script>
+const $=id=>document.getElementById(id);
+const CLS={0:"A",1:"B",2:"C",3:"D",4:"E",5:"F",6:"G"};
+const TYP={0:"",1:"Restricted",2:"Danger",3:"Prohibited",4:"CTR",5:"TMZ",6:"RMZ",7:"TMA",8:"TRA",9:"TSA",
+  10:"FIR",11:"UIR",12:"ADIZ",13:"ATZ",14:"MATZ",15:"Airway",16:"MTR",17:"Alert",18:"Warning",
+  19:"Protected",20:"HTZ",21:"Gliding",22:"TRP",23:"TIZ",24:"TIA",25:"MTA",26:"CTA",27:"ACC",28:"Sport",29:"Low-level route"};
+function fmtLim(l){
+  if(!l)return "?";
+  if(l.value===0&&l.referenceDatum===0)return "SFC";
+  const u=l.unit===6?"FL":(l.unit===1?"ft":(l.unit===0?"m":"?"));
+  const r=l.referenceDatum===0?" AGL":(l.referenceDatum===1?" MSL":(l.referenceDatum===2?" STD":""));
+  return u==="FL"?("FL"+l.value):(l.value+" "+u+r);
+}
+function log(m,c){$("log").innerHTML+=`<span class="${c||""}">${m}</span>\n`;}
+$("go").onclick=async()=>{
+  const key=$("key").value.trim(), bbox=$("bbox").value.trim();
+  $("log").innerHTML=""; $("dl").style.display="none";
+  if(!key){log("No API key entered.","err");return;}
+  $("go").disabled=true;
+  const feats=[]; let page=1, pages=1;
+  try{
+    do{
+      log(`Fetching page ${page}…`);
+      const r=await fetch(`https://api.core.openaip.net/api/airspaces?bbox=${encodeURIComponent(bbox)}&limit=1000&page=${page}`,
+        {headers:{"x-openaip-api-key":key}});
+      if(!r.ok){log(`HTTP ${r.status} ${r.statusText} — check the key (401/403) or parameters (400).`,"err");
+        $("go").disabled=false;return;}
+      const d=await r.json();
+      const items=d.items||[];
+      if(d.totalCount&&d.limit)pages=Math.ceil(d.totalCount/d.limit);
+      else if(d.totalPages)pages=d.totalPages;
+      items.forEach(a=>{
+        if(!a.geometry)return;
+        feats.push({type:"Feature",geometry:a.geometry,properties:{
+          name:a.name||"?",
+          cls:CLS[a.icaoClass]??String(a.icaoClass??"?"),
+          typ:TYP[a.type]??String(a.type??""),
+          fl:fmtLim(a.lowerLimit), ce:fmtLim(a.upperLimit),
+          rawClass:a.icaoClass, rawType:a.type
+        }});
+      });
+      log(`  +${items.length} airspaces (total ${feats.length})`,"ok");
+      page++;
+      if(items.length===0)break;
+    }while(page<=pages&&page<=25);
+    if(!feats.length){log("Nothing returned — check bbox.","err");$("go").disabled=false;return;}
+    const gj={type:"FeatureCollection",
+      meta:{source:"openAIP",fetched:new Date().toISOString(),bbox:bbox,
+            note:"Community data — verify against current VNC/VTA/CFS."},
+      features:feats};
+    const blob=new Blob([JSON.stringify(gj)],{type:"application/json"});
+    $("dl").href=URL.createObjectURL(blob);
+    $("dl").style.display="block";
+    log(`Done: ${feats.length} airspaces, ${(blob.size/1024).toFixed(0)} kB. Tap the green button to save.`,"ok");
+  }catch(e){
+    log("Fetch failed: "+e.message,"err");
+    log("If this says 'Failed to fetch', the openAIP API may be blocking browser requests (CORS) — tell Claude and we'll switch to a command-line fetch instead.","err");
+  }
+  $("go").disabled=false;
+};
+</script>
+</body>
+</html>
